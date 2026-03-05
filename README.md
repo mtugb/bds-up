@@ -9,7 +9,7 @@ A tool that update your minecraft bedrock dedicated server.
 - **Executable Permission**: This tool will give server dir excutable permission after updating so that the bds server can get started just by executing official command, ``LD_LIBRARY_PATH=. ./bedrock_server``.
 
 ## Supported OS
-As, this tool is designed specializing for linux (ubuntu) os, commonly used for Minecraft Server, this tool only support Ubuntu / Linux.
+As this tool is designed for linux environment which is commonly used for Minecraft Server, this tool only support Ubuntu / Linux and is **not compatible with Windows or other OS**.
 
 ## Installation
 ```
