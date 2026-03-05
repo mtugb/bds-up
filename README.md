@@ -22,13 +22,13 @@ mv -f bdsup ~/bin/
 if ! grep -q '~/bin' ~/.bashrc; then
   echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
   echo "Path added to .bashrc. Please restart your shell or run 'source ~/.bashrc'."
-fi
+fi
 ```
 
 ## Usage
 ```bash
 cd my_bedrock_server/
-# Interective updated (this update BDS server in . (current directory))
+# Interective update (this update BDS server in . (current directory))
 bdsup
 ```
 ### Options
