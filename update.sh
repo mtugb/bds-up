@@ -1,0 +1,2 @@
+wget https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.1.1.zip
+unzip bedrock-server-1.26.1.1.zip -d bds
