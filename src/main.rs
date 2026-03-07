@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs;
 use std::io;
 use std::io::Cursor;
@@ -6,6 +5,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context;
+use anyhow::Ok;
+use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
 use console::style;
@@ -36,7 +38,7 @@ struct Args {
     target_dir: PathBuf,
 }
 
-fn parse_properties(raw: &str) -> IndexMap<&str, &str> {
+fn parse_properties(raw: &str) -> Result<IndexMap<&str, &str>> {
     let mut propmap = IndexMap::new();
     for line in raw.lines() {
         if line.starts_with("#") || line.is_empty() {
@@ -44,10 +46,10 @@ fn parse_properties(raw: &str) -> IndexMap<&str, &str> {
         };
         let mut splited = line.split("=");
         let key = splited.next().unwrap();
-        let value = splited.next().expect("Illegal Syntax");
+        let value = splited.next().with_context(|| "Illegal Syntax")?;
         propmap.insert(key, value);
     }
-    propmap
+    Ok(propmap)
 }
 
 // -----
@@ -57,7 +59,7 @@ fn parse_properties(raw: &str) -> IndexMap<&str, &str> {
 
 use std::path::Path;
 
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
     fs::create_dir_all(&dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -71,6 +73,62 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> 
     Ok(())
 }
 // -----
+//
+// The reason for "entries_on_layer: &mut Vec<PathBuf>":
+// If "&Path" is used instead of "PathBuf", you lose access to entries when this function returns.
+fn append_entries_to_list(
+    entries_on_layer: &mut Vec<PathBuf>,
+    dir: &Path,
+) -> Result<(), anyhow::Error> {
+    let entries = dir.read_dir()?;
+    for entry in entries {
+        entries_on_layer.push(entry?.path());
+    }
+    Ok(())
+}
+// Safely copy all the files in target dir
+// from: /from/
+// to  : /to/
+fn copy_inner_dir(from: &Path, to: &Path) -> Result<()> {
+    if !from.exists() {
+        return Err(anyhow::anyhow!("Source directory doesn't exists"));
+    }
+    if to.exists() {
+        return Err(anyhow::anyhow!("Target directory already exists"));
+    }
+    let mut entries_on_layer: Vec<PathBuf> = Vec::new();
+    // entries: /from/*
+    append_entries_to_list(&mut entries_on_layer, from)?;
+    fs::create_dir(to)?;
+    while !entries_on_layer.is_empty() {
+        let mut children: Vec<PathBuf> = Vec::new();
+        for entry in &entries_on_layer {
+            let entry_relative = entry
+                .strip_prefix(from)
+                .with_context(|| format!("Failed to strip prefix {:?} from {:?}", from, entry))?;
+            if entry.is_dir() {
+                fs::create_dir(to.join(entry_relative))?;
+                append_entries_to_list(&mut children, entry)?;
+            } else {
+                fs::copy(entry, to.join(entry_relative))?;
+            }
+        }
+        entries_on_layer = children;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() -> Result<()> {
+        copy_inner_dir(Path::new("test"), Path::new("test_target"))?;
+        Ok(())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[allow(non_snake_case)]
@@ -93,7 +151,7 @@ struct VersionDetail {
     download_url: String,
 }
 
-async fn get_dl_url_with_interection(args: &Args) -> Result<String, Box<dyn Error>> {
+async fn get_dl_url_with_interection(args: &Args) -> Result<String> {
     const API_BASE: &str = "https://raw.githubusercontent.com/Bedrock-OSS/BDS-Versions/main";
     let manifest_json = reqwest::get(format!("{}/versions.json", API_BASE))
         .await?
@@ -142,13 +200,13 @@ async fn get_dl_url_with_interection(args: &Args) -> Result<String, Box<dyn Erro
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let args = Args::parse();
     run_update(args).await?;
     Ok(())
 }
 
-async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_update(args: Args) -> Result<()> {
     let target_dir = &args.target_dir;
     println!(
         "Going to update BDS server in {}",
@@ -164,12 +222,18 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let backup_needed = !args.no_backup
         && Confirm::new()
             .with_prompt("Do you need backup?")
+            .default(true)
             .interact()?;
 
     // Loads current settings
     let current_config_path = target_dir.join("server.properties");
-    let current_config_raw = fs::read_to_string(current_config_path)?;
-    let current_config = parse_properties(&current_config_raw);
+    let current_config_raw = fs::read_to_string(&current_config_path).with_context(|| {
+        format!(
+            "{} was not found",
+            current_config_path.into_os_string().into_string().unwrap()
+        )
+    })?;
+    let current_config = parse_properties(&current_config_raw)?;
     // println!("{:?}", current_config);
 
     // Prepare resource target url
@@ -181,7 +245,7 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let zip_response = reqwest::get(zip_url).await?;
     let zip_total_size = zip_response
         .content_length()
-        .ok_or("長さを取得できませんでした。")?;
+        .with_context(|| "長さを取得できませんでした。")?;
     zip_fetch_pb.finish_with_message(format!(
         "{} Connection established",
         style("✓").green().bold()
@@ -205,7 +269,7 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut zip_file = ZipArchive::new(zip_blob)?;
     let latest_config_blob = zip_file.by_name("server.properties")?;
     let latest_config_raw = io::read_to_string(latest_config_blob)?;
-    let latest_config = parse_properties(&latest_config_raw);
+    let latest_config = parse_properties(&latest_config_raw)?;
 
     // Merges settings
     let mut merged_config = current_config.clone();
@@ -221,7 +285,9 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     copy_pb.set_style(ProgressStyle::default_bar().progress_chars("#>-"));
 
     // Extracts latests
-    let latest_root = TempDir::new()?;
+    // let latest_root = TempDir::new()?;
+    // /tmp may be in another file system
+    let latest_root = TempDir::new_in(target_dir.parent().unwrap_or_else(|| Path::new(".")))?;
     for i in 0..zip_file.len() {
         let mut entry = zip_file.by_index(i)?;
         let relative_path = entry.name();
@@ -253,8 +319,6 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let file_to_copy = [
         "allowlist.json",
         "permissions.json",
-        "valid_known_packs.json", // TODO: implement process to update this in case of vanilla-
-        // updates
         "world_behavior_packs.json",
         "world_resource_packs.json",
     ];
@@ -280,15 +344,18 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if backup_needed {
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%SZ").to_string();
-        let backup_path = PathBuf::from(format!("{}-backup-{}", target_dir.display(), timestamp));
-        fs::rename(target_dir, backup_path)?;
-    } else {
-        fs::remove_dir_all(target_dir)?;
-    }
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%SZ").to_string();
+    let backup_path = PathBuf::from(format!("{}-backup-{}", target_dir.display(), timestamp));
 
-    copy_dir_all(latest_root.path(), target_dir)?;
+    fs::rename(target_dir, &backup_path)?;
+    if let Err(e) = copy_inner_dir(latest_root.path(), target_dir) {
+        let _ = fs::remove_dir_all(target_dir);
+        fs::rename(&backup_path, target_dir).with_context(||format!(
+            "Update failed: {e}\nRollback also failed.\nManual recovery needed: rename {:?} to {:?}",
+            backup_path, target_dir
+        ))?;
+        return Err(e);
+    }
 
     #[cfg(unix)] // Linux/macOSの場合のみ実行
     {
@@ -305,6 +372,15 @@ async fn run_update(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         "{} completed successfully!☆彡",
         style("Updating").green().bold()
     );
+
+    //すべて成功したときのみ最後に必要ならバックアップ削除
+    if !backup_needed && let Err(e) = fs::remove_dir_all(&backup_path) {
+        println!(
+            "バックアップディレクトリ'{}'の削除に失敗しました",
+            &backup_path.into_os_string().into_string().unwrap()
+        );
+        return Err(e.into());
+    }
 
     Ok(())
 }
